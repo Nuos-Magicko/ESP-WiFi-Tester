@@ -3,8 +3,8 @@
 This project aims to measure and compare the Wi-Fi performance of different ESP32 boards, with a focus on real application-level performance.
 
 The measured parameters include:
-- RSSI (Received Signal Strength Indicator)
-- TCP Throughput (Mbps)
+- RSSI (Received Signal Strength Indicator) [dBm]
+- TCP (Transmission Control Protocol) Throughput [Mbps]
 
 Data is transmitted from the ESP32 via Serial in JSON format, then recorded, analyzed, and visualized on a PC.
 
@@ -95,9 +95,6 @@ These statistics are used to compare Wi-Fi performance across different MCU boar
     > **Note:** iPerf version **2.x** is required.
 5. Configure Python Logger (main/wifi_test.py)
     - Edit the following parameters in:
-      ``` bash
-      main/wifi_test.py
-      ```
       ```python
       DEFAULT_PORT = 'COM19'        # Windows: COMx, Linux/Mac: /dev/ttyUSBx
       DEFAULT_BAUD = 115200
@@ -112,9 +109,6 @@ These statistics are used to compare Wi-Fi performance across different MCU boar
     - Stop the program with Ctrl + C when finished
 7. Run Statistical Analysis
     - Edit and run (main/analysis.py):
-      ``` bash
-      main/analysis.py
-      ```
       ```python
       CSV_PATH = os.path.join(BASE_DIR, "mgi_stats_samples.csv") # rename the csv file
       stats.to_csv(os.path.join(BASE_DIR, "mgi_stats_30samples.csv")) # rename the csv file
