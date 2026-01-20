@@ -1,4 +1,5 @@
-import sys
+#open terminal and run: .\iperf -s
+
 import serial
 import json
 import time
@@ -8,19 +9,43 @@ import re
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from collections import deque
+import csv
+import os
 
 # --- USER CONFIGURATION ---
 # Default settings (can be overridden by command line args)
-DEFAULT_PORT = 'COM3'        # Windows: COMx, Linux/Mac: /dev/ttyUSBx
+DEFAULT_PORT = 'COM19'        # Windows: COMx, Linux/Mac: /dev/ttyUSBx
 DEFAULT_BAUD = 115200
-DEFAULT_PC_IP = "192.168.1.100" # Your PC's IP address
+DEFAULT_PC_IP = "192.168.10.22" # Your PC's IP address
 # --------------------------
 
+TIME_WINDOW = 30  # seconds
+
 # Global State
-rssi_buffer = deque([0]*200, maxlen=200)
-throughput_buffer = deque([0]*200, maxlen=200) # Placeholder if we parse speed later
+rssi_buffer = deque(maxlen=500)        # (time, rssi)
+throughput_buffer = deque(maxlen=500)  # (time, mbps)
 stop_threads = False
 esp_connected = False
+
+SAMPLE_COUNT = 30
+
+rssi_samples = []
+tp_samples = []
+ts_samples = []
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(BASE_DIR, "mgi_stats_samples.csv")
+
+def write_raw_csv(ts, rssi, tp):
+    file_exists = os.path.exists(CSV_PATH)
+
+    with open(CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(["esp_ts_sec","rssi","throughput_mbps"])
+
+        writer.writerow([round(ts, 6),rssi,round(tp, 2)])
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='ESP32 Wi-Fi Test Commander')
@@ -45,14 +70,15 @@ def serial_handler(ser, pc_ip):
     # -i 1: Report every second
     # -t 6000: Run for 100 minutes (effectively forever for testing)
     print(f"Sending iPerf Command targeting {pc_ip}...")
-    cmd = f"iperf -c {pc_ip} -i 1 -t 6000\n"
-    ser.write(cmd.encode())
+    # cmd = f"iperf -c {pc_ip} -i 1 -t 6000\n"
+    # ser.write(cmd.encode())
 
     while not stop_threads:
         try:
             if ser.in_waiting:
                 # Read binary and decode, ignoring weird startup characters
                 line = ser.readline().decode('utf-8', errors='replace').strip()
+                print(f"RAW: {line}")  # Debug: Print raw line
                 
                 if not line:
                     continue
@@ -63,17 +89,20 @@ def serial_handler(ser, pc_ip):
                     try:
                         json_str = line.replace("DATA:", "")
                         data = json.loads(json_str)
-                        rssi_buffer.append(data.get("rssi", -100))
-                    except ValueError:
+
+                        if "rssi" in data and "throughput" in data and "ts" in data:
+                            ts_esp = data["ts"] / 1_000_000 
+                            rssi = data["rssi"]
+                            tp   = data["throughput"]
+                            
+                            now = time.time()
+                            rssi_buffer.append((now, rssi))
+                            throughput_buffer.append((now, tp))
+
+                            write_raw_csv(ts_esp, rssi, tp)
+
+                    except json.JSONDecodeError:
                         pass
-                
-                # --- PARSER 2: IPERF SPEED ---
-                # Standard iPerf output looks like: 
-                # [ 0] 3.0- 4.0 sec  1.25 MBytes  10.5 Mbits/sec
-                elif "Mbits/sec" in line:
-                    print(f"SPEED: {line}") # Print speed to console
-                    # Optional: Regex to extract speed number for a second graph
-                    # match = re.search(r'([\d\.]+)\s+Mbits/sec', line)
                 
                 # --- PARSER 3: SYSTEM LOGS ---
                 else:
@@ -86,7 +115,7 @@ def serial_handler(ser, pc_ip):
 
 def main():
     args = parse_arguments()
-    
+
     try:
         ser = serial.Serial(args.port, DEFAULT_BAUD, timeout=0.1)
     except serial.SerialException as e:
@@ -110,7 +139,6 @@ def main():
     
     # RSSI Line
     line_rssi, = ax.plot([], [], color='#00ff00', linewidth=2, label='RSSI')
-    ax.legend(loc='upper right')
     
     # Background color for dark mode feel (Optional)
     ax.set_facecolor('#1e1e1e')
@@ -120,12 +148,44 @@ def main():
     ax.xaxis.label.set_color('white')
     ax.title.set_color('white')
     
+    ax2 = ax.twinx()
+    ax2.set_ylabel("Throughput (Mbps)")
+    ax2.set_ylim(0, 10)
+    ax2.tick_params(colors='cyan')
+    ax2.yaxis.label.set_color('cyan')
+    
+    
+    line_tp, = ax2.plot([], [], color='cyan', linewidth=2, label='Throughput')
+    
+    lines = [line_rssi, line_tp]
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, loc='upper right')
+
+    
     # Animation Update
     def update(frame):
-        line_rssi.set_data(range(len(rssi_buffer)), rssi_buffer)
-        return line_rssi,
+        now = time.time()
 
-    ani = FuncAnimation(fig, update, interval=100, blit=True)
+        # ----- RSSI -----
+        rssi_data = [(t, v) for t, v in rssi_buffer if now - t <= TIME_WINDOW]
+        if rssi_data:
+            x_rssi = [t - now for t, _ in rssi_data]   # time relative (negative)
+            y_rssi = [v for _, v in rssi_data]
+            line_rssi.set_data(x_rssi, y_rssi)
+
+        # ----- Throughput -----
+        tp_data = [(t, v) for t, v in throughput_buffer if now - t <= TIME_WINDOW]
+        if tp_data:
+            x_tp = [t - now for t, _ in tp_data]
+            y_tp = [v for _, v in tp_data]
+            line_tp.set_data(x_tp, y_tp)
+
+        ax.set_xlim(-TIME_WINDOW, 0)
+        ax2.set_xlim(-TIME_WINDOW, 0)
+
+        return line_rssi, line_tp
+
+    ani = FuncAnimation(fig, update, interval=100, blit=False)
     
     print("Starting GUI... Press Ctrl+C in console to stop.")
     plt.show()
