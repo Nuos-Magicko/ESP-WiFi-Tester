@@ -108,11 +108,12 @@ These statistics are used to compare Wi-Fi performance across different MCU boar
     - Collect at least 30 samples
     - Stop the program with Ctrl + C when finished
 7. Run Statistical Analysis
-    - Edit and run (main/analysis.py):
+    - Edit (main/analysis.py):
       ```python
       CSV_PATH = os.path.join(BASE_DIR, "mgi_stats_samples.csv") # rename the csv file
       stats.to_csv(os.path.join(BASE_DIR, "mgi_stats_30samples.csv")) # rename the csv file
       ```
+    - Run
       ```bash
       python main/analysis.py
       ```
