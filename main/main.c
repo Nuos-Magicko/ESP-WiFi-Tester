@@ -1,50 +1,77 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
-#include "esp_console.h"
-#include "driver/uart.h"
-#include "iperf.h" 
 
-/* --- USER CONFIGURATION --- */
-#define WIFI_SSID      "TEST"
-#define WIFI_PASS      "12345678"
-/* -------------------------- */
+/* ---------- USER CONFIG ---------- */
+#define WIFI_SSID      "NUOSphere"
+#define WIFI_PASS      "1stSafeAGI"
+
+#define SERVER_IP      "192.168.10.22"   // PC IP
+#define SERVER_PORT    5001              // iperf default
+/* -------------------------------- */
 
 static const char *TAG = "wifi_tester";
-bool is_connected = false;
+static bool is_connected = false;
 
-// --- 1. WIFI HANDLER ---
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+/* ======= SHARED MEASUREMENTS ======= */
+static int   latest_rssi  = 0;
+static float latest_mbps  = 0.0f;
+
+/* ========= WIFI EVENT HANDLER ========= */
+static void wifi_event_handler(void* arg,
+                               esp_event_base_t event_base,
+                               int32_t event_id,
+                               void* event_data)
+{
+    if (event_base == WIFI_EVENT &&
+        event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    }
+    else if (event_base == WIFI_EVENT &&
+             event_id == WIFI_EVENT_STA_DISCONNECTED) {
         is_connected = false;
-        ESP_LOGI(TAG, "Disconnected. Retrying...");
+        ESP_LOGI(TAG, "Disconnected, retrying...");
         esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    }
+    else if (event_base == IP_EVENT &&
+             event_id == IP_EVENT_STA_GOT_IP) {
         is_connected = true;
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        ip_event_got_ip_t* event =
+            (ip_event_got_ip_t*)event_data;
+
+        ESP_LOGI(TAG, "Got IP: " IPSTR,
+                 IP2STR(&event->ip_info.ip));
     }
 }
 
-void wifi_init_sta(void) {
+/* ========= WIFI INIT ========= */
+void wifi_init_sta(void)
+{
     esp_netif_init();
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
 
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID,
+        &wifi_event_handler, NULL, NULL);
+
+    esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP,
+        &wifi_event_handler, NULL, NULL);
 
     wifi_config_t wifi_config = {
         .sta = {
@@ -53,85 +80,128 @@ void wifi_init_sta(void) {
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
+
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
 }
 
-// --- 2. RSSI MONITOR TASK ---
-void rssi_monitor_task(void *pvParameters) {
+/* ========= RSSI TASK ========= */
+void rssi_monitor_task(void *pvParameters)
+{
     wifi_ap_record_t ap_info;
+
     while (1) {
-        if (is_connected && esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-            // Print JSON for Python
-            printf("DATA:{\"rssi\": %d, \"ch\": %d}\n", ap_info.rssi, ap_info.primary);
+        if (is_connected &&
+            esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+
+            latest_rssi = ap_info.rssi;
         }
-        vTaskDelay(pdMS_TO_TICKS(200)); 
+        vTaskDelay(pdMS_TO_TICKS(1000));  // 1 Hz
     }
 }
 
-// --- 3. COMMAND PARSER ---
-void run_iperf_client(char* ip_str) {
-    iperf_cfg_t cfg;
-    
-    // 1. Zero out the configuration
-    memset(&cfg, 0, sizeof(cfg));
+/* ========= THROUGHPUT TASK ========= */
+void throughput_task(void *pvParameters)
+{
+    struct sockaddr_in dest_addr;
+    char buffer[1400];
+    memset(buffer, 'A', sizeof(buffer));
 
-    // 2. Set strict fields for Client Mode
-    cfg.flag = IPERF_FLAG_CLIENT | IPERF_FLAG_TCP;
-    
-    // 3. Set Destination IP safely (Fixes the struct error)
-    // inet_addr converts string "192.168.1.50" to integer
-    uint32_t ip_int = inet_addr(ip_str);
-    
-    // Use the LwIP helper to set the address into the struct
-    ip_addr_set_ip4_u32(&cfg.destination, ip_int);
+    uint64_t bytes = 0;
+    int64_t calc_start = 0;
 
-    cfg.time = 6000;        // Duration in seconds
-    cfg.interval = 1;       // Report every 1s
-    
-    ESP_LOGI(TAG, "Starting iPerf Client targeting: %s", ip_str);
-    iperf_start(&cfg);
-}
-
-void console_task(void *pvParameters) {
-    char line[128];
     while (1) {
-        // Read from stdin (UART)
-        if (fgets(line, sizeof(line), stdin) != NULL) {
-            // Remove newline
-            line[strcspn(line, "\n")] = 0;
 
-            // Check if it's an iPerf command
-            // Python sends: "iperf -c 192.168.1.50 -i 1 -t 6000"
-            if (strncmp(line, "iperf -c", 8) == 0) {
-                // Extract IP (simple parsing)
-                char *ip_start = line + 9;
-                char *ip_end = strchr(ip_start, ' ');
-                if (ip_end != NULL) {
-                    *ip_end = '\0'; // Terminate string at the space
-                    run_iperf_client(ip_start);
-                }
+        while (!is_connected) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+
+        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+        if (sock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        struct timeval timeout = {
+            .tv_sec = 1,
+            .tv_usec = 0
+        };
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   &timeout, sizeof(timeout));
+
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(SERVER_PORT);
+        inet_pton(AF_INET, SERVER_IP,
+                  &dest_addr.sin_addr);
+
+        if (connect(sock,
+            (struct sockaddr *)&dest_addr,
+            sizeof(dest_addr)) != 0) {
+
+            close(sock);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        bytes = 0;
+        calc_start = esp_timer_get_time();
+
+        while (is_connected) {
+
+            int sent = send(sock,buffer,sizeof(buffer),0);
+            if (sent <= 0) break;
+
+            bytes += sent;
+
+            int64_t now = esp_timer_get_time();
+
+            if (now - calc_start >= 1000000) {
+                latest_mbps = (bytes * 8.0f) / 1e6;
+                bytes = 0;
+                calc_start = now;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+
+        close(sock);
     }
 }
 
-void app_main(void) {
-    // NVS Init
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+/* ========= DATA PUBLISH TASK ========= */
+void data_publish_task(void *pvParameters)
+{
+    while (1) {
+        if (is_connected) {
+            printf(
+                "DATA:{\"ts\":%lld,"
+                "\"rssi\":%d,"
+                "\"throughput\":%.2f}\n",
+                esp_timer_get_time(),
+                latest_rssi,
+                latest_mbps
+            );
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 Hz
     }
-    ESP_ERROR_CHECK(ret);
+}
 
-    ESP_LOGI(TAG, "Starting ESP32 Wi-Fi Tester...");
-    
+/* ========= APP MAIN ========= */
+void app_main(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    ESP_LOGI(TAG, "Starting ESP32 Wi-Fi Tester");
+
     wifi_init_sta();
-    
-    // Start Tasks
-    xTaskCreate(rssi_monitor_task, "rssi_monitor", 4096, NULL, 5, NULL);
-    xTaskCreate(console_task, "console_task", 4096, NULL, 5, NULL);
+
+    xTaskCreate(rssi_monitor_task,"rssi_monitor",4096, NULL, 5, NULL);
+
+    xTaskCreate(throughput_task,"throughput",4096, NULL, 5, NULL);
+
+    xTaskCreate(data_publish_task,"data_publisher",4096, NULL, 5, NULL);
 }
