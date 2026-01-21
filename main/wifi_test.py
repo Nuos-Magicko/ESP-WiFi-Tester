@@ -1,20 +1,27 @@
-#open terminal and run: .\iperf -s
+""" ESP32 Wi-Fi Tester 
+You can use this script to command an ESP32 device over serial to perform Wi-Fi tests.
+It will start an iPerf test to a specified server IP and parse RSSI and throughput data
+from the serial output, displaying them in real-time graphs.
 
-import serial
+All data is also logged to a CSV file for further analysis.
+
+More Info: https://github.com/Nuos-Magicko/ESP-WiFi-Tester/tree/mai-wifi-dev
+"""
+
+from collections import deque
+import csv
 import json
 import time
 import threading
 import argparse
-import re
+import os
+import serial
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from collections import deque
-import csv
-import os
 
 # --- USER CONFIGURATION ---
 # Default settings (can be overridden by command line args)
-DEFAULT_PORT = 'COM19'        # Windows: COMx, Linux/Mac: /dev/ttyUSBx
+DEFAULT_PORT = 'COM6'        # Windows: COMx, Linux/Mac: /dev/ttyUSBx
 DEFAULT_BAUD = 115200
 DEFAULT_PC_IP = "192.168.10.22" # Your PC's IP address
 # --------------------------
@@ -24,8 +31,7 @@ TIME_WINDOW = 30  # seconds
 # Global State
 rssi_buffer = deque(maxlen=500)        # (time, rssi)
 throughput_buffer = deque(maxlen=500)  # (time, mbps)
-stop_threads = False
-esp_connected = False
+stop_event = threading.Event()
 
 SAMPLE_COUNT = 30
 
@@ -36,10 +42,17 @@ ts_samples = []
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "mgi_stats_samples.csv")
 
-def write_raw_csv(ts, rssi, tp):
+def write_raw_csv(ts: float, rssi:int, tp:float):
+    """Write raw CSV data to a file.
+
+    Args:
+        ts (float): ESP timestamp in seconds
+        rssi (int): RSSI value in dBm
+        tp (float): Throughput in Mbps
+    """
     file_exists = os.path.exists(CSV_PATH)
 
-    with open(CSV_PATH, "a", newline="") as f:
+    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
 
         if not file_exists:
@@ -47,39 +60,43 @@ def write_raw_csv(ts, rssi, tp):
 
         writer.writerow([round(ts, 6),rssi,round(tp, 2)])
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments
+    """
     parser = argparse.ArgumentParser(description='ESP32 Wi-Fi Test Commander')
     parser.add_argument('--port', type=str, default=DEFAULT_PORT, help='Serial Port')
     parser.add_argument('--ip', type=str, default=DEFAULT_PC_IP, help='PC IP Address (Server)')
     return parser.parse_args()
 
-def serial_handler(ser, pc_ip):
-    global esp_connected
-    
+def serial_handler(ser: serial.Serial, pc_ip: str):
+    """Handle serial communication with the ESP32.
+
+    Args:
+        ser (serial.Serial): Serial connection object
+        pc_ip (str): IP address of the PC (iPerf server)
+    """
+
     print(f"Opening Serial on {ser.port}...")
-    
+
     # Wait for boot
-    time.sleep(2) 
-    
+    time.sleep(2)
+
     # Send a few 'enters' to clear the console prompt
-    ser.write(b'\n\n') 
+    ser.write(b'\n\n')
     time.sleep(0.5)
 
-    # 1. Start the iPerf test automatically after a short delay
-    # We send the command: iperf -c <IP> -i 1 -t 6000
-    # -i 1: Report every second
-    # -t 6000: Run for 100 minutes (effectively forever for testing)
     print(f"Sending iPerf Command targeting {pc_ip}...")
-    # cmd = f"iperf -c {pc_ip} -i 1 -t 6000\n"
-    # ser.write(cmd.encode())
 
-    while not stop_threads:
+    while not stop_event.is_set():
         try:
             if ser.in_waiting:
                 # Read binary and decode, ignoring weird startup characters
                 line = ser.readline().decode('utf-8', errors='replace').strip()
                 print(f"RAW: {line}")  # Debug: Print raw line
-                
+
                 if not line:
                     continue
 
@@ -91,10 +108,10 @@ def serial_handler(ser, pc_ip):
                         data = json.loads(json_str)
 
                         if "rssi" in data and "throughput" in data and "ts" in data:
-                            ts_esp = data["ts"] / 1_000_000 
+                            ts_esp = data["ts"] / 1_000_000
                             rssi = data["rssi"]
                             tp   = data["throughput"]
-                            
+
                             now = time.time()
                             rssi_buffer.append((now, rssi))
                             throughput_buffer.append((now, tp))
@@ -103,17 +120,22 @@ def serial_handler(ser, pc_ip):
 
                     except json.JSONDecodeError:
                         pass
-                
-                # --- PARSER 3: SYSTEM LOGS ---
+
+                # --- PARSER 2: SYSTEM LOGS ---
                 else:
                     # Print normal logs slightly dimmed or prefixed
                     print(f"[LOG]: {line}")
 
-        except Exception as e:
+        except serial.SerialException as e:
             print(f"Serial Error: {e}")
             break
 
-def main():
+def main() -> None:
+    """Main entry point of the ESP32 Wi-Fi monitoring application.
+
+    Returns:
+        None: This function does not return any value.
+    """
     args = parse_arguments()
 
     try:
@@ -129,17 +151,17 @@ def main():
 
     # Setup Graph
     fig, ax = plt.subplots(figsize=(10, 6))
-    
+
     # Style the plot
     ax.set_title(f"ESP32 Wi-Fi Signal Strength (Target: {args.ip})")
     ax.set_ylabel("RSSI (dBm)")
     ax.set_xlabel("Time (Samples)")
     ax.set_ylim(-100, -10)
     ax.grid(True, linestyle='--', alpha=0.7)
-    
+
     # RSSI Line
     line_rssi, = ax.plot([], [], color='#00ff00', linewidth=2, label='RSSI')
-    
+
     # Background color for dark mode feel (Optional)
     ax.set_facecolor('#1e1e1e')
     fig.patch.set_facecolor('#121212')
@@ -147,23 +169,32 @@ def main():
     ax.yaxis.label.set_color('white')
     ax.xaxis.label.set_color('white')
     ax.title.set_color('white')
-    
+
     ax2 = ax.twinx()
     ax2.set_ylabel("Throughput (Mbps)")
     ax2.set_ylim(0, 10)
     ax2.tick_params(colors='cyan')
     ax2.yaxis.label.set_color('cyan')
-    
-    
+
     line_tp, = ax2.plot([], [], color='cyan', linewidth=2, label='Throughput')
-    
+
     lines = [line_rssi, line_tp]
     labels = [l.get_label() for l in lines]
     ax.legend(lines, labels, loc='upper right')
 
-    
     # Animation Update
-    def update(frame):
+    def update(_frame: int):
+        """Update RSSI and throughput plots for each animation frame.
+        
+        This function is called periodically by Matplotlib's FuncAnimation
+        to refresh the real-time Wi-Fi measurement graphs.
+
+        Args:
+            _frame (int): The current animation frame number.
+
+        Returns:
+            tuple: A tuple containing the updated plot lines.
+        """
         now = time.time()
 
         # ----- RSSI -----
@@ -185,13 +216,12 @@ def main():
 
         return line_rssi, line_tp
 
-    ani = FuncAnimation(fig, update, interval=100, blit=False)
-    
+    _ani = FuncAnimation(fig, update, interval=100, blit=False)
+
     print("Starting GUI... Press Ctrl+C in console to stop.")
     plt.show()
 
-    global stop_threads
-    stop_threads = True
+    stop_event.set()
     ser.close()
 
 if __name__ == "__main__":
