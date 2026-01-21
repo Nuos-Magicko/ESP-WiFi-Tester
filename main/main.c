@@ -1,3 +1,11 @@
+/**
+ * @file wifi_tester.c
+ * @brief ESP32 Wi-Fi performance measurement application.
+ *
+ * Measures RSSI and TCP throughput and publishes
+ * the results via Serial in JSON format.
+ */
+
 #include <string.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -13,22 +21,41 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
-/* ---------- USER CONFIG ---------- */
+/** Wi-Fi SSID */
 #define WIFI_SSID      "NUOSphere"
+
+/** Wi-Fi password */
 #define WIFI_PASS      "1stSafeAGI"
 
-#define SERVER_IP      "192.168.10.22"   // PC IP
-#define SERVER_PORT    5001              // iperf default
-/* -------------------------------- */
+/** PC IP address (iPerf server) */
+#define SERVER_IP      "192.168.10.22"
 
+/** TCP server port (iPerf default: 5001) */
+#define SERVER_PORT    5001
+
+/** Logging tag for ESP_LOGx */
 static const char *TAG = "wifi_tester";
-static bool is_connected = false;
 
-/* ======= SHARED MEASUREMENTS ======= */
-static int   latest_rssi  = 0;
-static float latest_mbps  = 0.0f;
+/** Connection status flag */
+static volatile bool is_connected = false;
 
-/* ========= WIFI EVENT HANDLER ========= */
+/** Latest RSSI value (updated by rssi_monitor_task) */
+static volatile int latest_rssi  = 0;
+
+/** Latest TCP throughput in Mbps (updated by throughput_task) */
+static volatile float latest_mbps  = 0.0f;
+
+/**
+ * @brief Wi-Fi and IP event handler.
+ *
+ * Handles Wi-Fi connection events including start, disconnect,
+ * and successful IP acquisition.
+ *
+ * @param arg        User-defined argument (unused)
+ * @param event_base Event base (WIFI_EVENT or IP_EVENT)
+ * @param event_id   Event ID
+ * @param event_data Event-specific data
+ */
 static void wifi_event_handler(void* arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -55,7 +82,12 @@ static void wifi_event_handler(void* arg,
     }
 }
 
-/* ========= WIFI INIT ========= */
+/**
+ * @brief Initialize ESP32 Wi-Fi in station mode.
+ *
+ * Configures Wi-Fi, registers event handlers,
+ * and starts connection to the access point.
+ */
 void wifi_init_sta(void)
 {
     esp_netif_init();
@@ -86,7 +118,14 @@ void wifi_init_sta(void)
     esp_wifi_start();
 }
 
-/* ========= RSSI TASK ========= */
+/**
+ * @brief FreeRTOS task for monitoring Wi-Fi RSSI.
+ *
+ * Periodically reads RSSI from the connected access point
+ * and updates the shared RSSI variable.
+ *
+ * @param pvParameters Task parameters (unused)
+ */
 void rssi_monitor_task(void *pvParameters)
 {
     wifi_ap_record_t ap_info;
@@ -101,7 +140,14 @@ void rssi_monitor_task(void *pvParameters)
     }
 }
 
-/* ========= THROUGHPUT TASK ========= */
+/**
+ * @brief FreeRTOS task for measuring TCP throughput.
+ *
+ * Continuously sends TCP data to a PC server (iPerf)
+ * and calculates application-level throughput in Mbps.
+ *
+ * @param pvParameters Task parameters (unused)
+ */
 void throughput_task(void *pvParameters)
 {
     struct sockaddr_in dest_addr;
@@ -167,7 +213,14 @@ void throughput_task(void *pvParameters)
     }
 }
 
-/* ========= DATA PUBLISH TASK ========= */
+/**
+ * @brief Publish Wi-Fi measurement data via Serial.
+ *
+ * Sends timestamp, RSSI, and throughput in JSON format
+ * over the serial interface at 1 Hz.
+ *
+ * @param pvParameters Task parameters (unused)
+ */
 void data_publish_task(void *pvParameters)
 {
     while (1) {
@@ -185,7 +238,13 @@ void data_publish_task(void *pvParameters)
     }
 }
 
-/* ========= APP MAIN ========= */
+/**
+ * @brief Application entry point.
+ *
+ * Initializes NVS, Wi-Fi, and creates FreeRTOS tasks
+ * for RSSI monitoring, throughput measurement,
+ * and data publishing.
+ */
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
